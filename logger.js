@@ -62,16 +62,19 @@ async function enviarLogCloudWatch(message) {
     }
 }
 
-//Logar informação
+//Logar informação - FIXED: Handle null/undefined req
 async function logInfo(message, req, extra = {}) {
-    const log = gerarLog('info', message, req.originalUrl, extra);
+    // Use optional chaining and provide fallback for system logs
+    const url = req?.originalUrl || 'system-startup';
+    const log = gerarLog('info', message, url, extra);
 
     await enviarLogCloudWatch(log);
 }
 
-//Logar erro
+//Logar erro - FIXED: Handle null/undefined req
 async function logError(message, req, error = {}, extra = {}) {
-    const url = req !== null ? req?.originalUrl : '';
+    // Use optional chaining and provide fallback for system logs
+    const url = req?.originalUrl || 'system-startup';
     let log = gerarLog('error', message, url, extra);
     if (error) {
         log.error = {error}
@@ -85,6 +88,7 @@ function gerarLog(level, message, rota, extra) {
         level: level,
         message,
         route: rota,
+        timestamp: new Date().toISOString(), // Added timestamp for better logging
         ...extra,
     };
 }

@@ -12,6 +12,30 @@ const AWS = require('aws-sdk');
 
 //Log
 const { logInfo, logError } = require('./logger');
+const mysql = require('mysql2/promise');
+
+// Configuração do pool MySQL com tratamento de erro
+const pool = mysql.createPool({
+    host: process.env.CNN_MYSQL_DB_HOST.replace(/"/g, ''),
+    user: process.env.CNN_MYSQL_DB_USER,
+    password: process.env.CNN_MYSQL_DB_PASSWORD,
+    database: process.env.CNN_MYSQL_DB_NAME,
+    port: process.env.CNN_MYSQL_DB_PORT,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
+});
+
+// Testar conexão MySQL na inicialização
+async function testMySQLConnection() {
+    try {
+        const connection = await pool.getConnection();
+        console.log('✅ MySQL conectado com sucesso');
+        connection.release();
+    } catch (error) {
+        console.error('❌ Erro ao conectar ao MySQL:', error.message);
+    }
+}
 
 app.use(express.json());
 
@@ -32,17 +56,29 @@ const upload = multer({
 *     description: Operações de Listar buckets, upload e remoção de arquivo para um bucket S3.
 */
 
+/**
+ * @swagger
+ * tags:
+ *   - name: CRUD MySQL
+ *     description: Operações de CRUD para produtos no MySQL.
+ */
 
 //#region CRUD MongoDb
+// Conexão MongoDB com tratamento de erro melhorado
 mongoose.connect(process.env.MONGO_URI, {
     useNewUrlParser: true,
     useUnifiedTopology: true,
-}).then(() => logInfo('MongoDB conectado', null))
-    .catch(err => logError('Erro ao logar mongodb' + err, null, err));
+}).then(() => {
+    logInfo('MongoDB conectado', null);
+    console.log('✅ MongoDB conectado com sucesso');
+}).catch(err => {
+    logError('Erro ao conectar MongoDB: ' + err, null, err);
+    console.error('❌ Erro ao conectar ao MongoDB:', err.message);
+});
 
 const UserSchema = new mongoose.Schema({
-    nome: String,
-    email: String
+    nome: { type: String, required: true },
+    email: { type: String, required: true }
 });
 
 const User = mongoose.model('Usuario', UserSchema);
@@ -63,10 +99,16 @@ const User = mongoose.model('Usuario', UserSchema);
  */
 app.get('/mongodb/testar-conexao', async (req, res) => {
     try {
-        //Tentando conectar ao MongoDB
-        await mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
-        const user = await User.findOne(); //Consulta simples (primeiro usuário encontrado)
-
+        // Verifica se a conexão já está estabelecida
+        if (mongoose.connection.readyState !== 1) {
+            await mongoose.connect(process.env.MONGO_URI, { 
+                useNewUrlParser: true, 
+                useUnifiedTopology: true 
+            });
+        }
+        
+        const user = await User.findOne();
+        
         logInfo('Conexão com o MongoDB efetuada com sucesso', req);
 
         if (user) {
@@ -75,10 +117,11 @@ app.get('/mongodb/testar-conexao', async (req, res) => {
             res.status(200).send('Conexão com o MongoDB bem-sucedida, mas nenhum usuário encontrado.');
         }
     } catch (error) {
-        await logError('Erro ao conectar no MongoDb' + error, req, error);
-        res.status(500).send('Erro na conexão com o MongoDB');
-    } finally {
-        mongoose.connection.close();
+        logError('Erro ao conectar no MongoDb: ' + error, req, error);
+        res.status(500).json({ 
+            error: 'Erro na conexão com o MongoDB',
+            message: error.message 
+        });
     }
 });
 
@@ -97,14 +140,14 @@ app.get('/mongodb/testar-conexao', async (req, res) => {
  *           schema:
  *             type: object
  *             properties:
- *               name:
+ *               nome:
  *                 type: string
  *                 description: Nome do usuário
  *               email:
  *                 type: string
  *                 description: Email do usuário
  *             required:
- *               - name
+ *               - nome
  *               - email
  *     responses:
  *       201:
@@ -117,7 +160,7 @@ app.get('/mongodb/testar-conexao', async (req, res) => {
  *                 _id:
  *                   type: string
  *                   description: ID do usuário
- *                 name:
+ *                 nome:
  *                   type: string
  *                 email:
  *                   type: string
@@ -126,13 +169,26 @@ app.get('/mongodb/testar-conexao', async (req, res) => {
  */
 app.post('/usuarios', async (req, res) => {
     try {
-        const user = new User(req.body);
+        const { nome, email } = req.body;
+        
+        // Validação básica
+        if (!nome || !email) {
+            return res.status(400).json({ 
+                error: 'Nome e email são obrigatórios' 
+            });
+        }
+
+        const user = new User({ nome, email });
         await user.save();
+        
         logInfo('Usuário criado', req);
-        res.status(201).send(user);
+        res.status(201).json(user);
     } catch (error) {
         logError("Erro ao criar usuário", req, error);
-        res.status(500).send('Ocorreu um erro interno');
+        res.status(500).json({ 
+            error: 'Erro ao criar usuário',
+            message: error.message 
+        });
     }
 });
 
@@ -165,12 +221,14 @@ app.get('/usuarios', async (req, res) => {
     try {
         const users = await User.find();
         logInfo('Usuários encontrados', req, users);
-        res.send(users);
+        res.status(200).json(users);
     } catch (error) {
         logError("Erro ao buscar usuários", req, error);
-        res.status(500).send('Ocorreu um erro interno');
+        res.status(500).json({ 
+            error: 'Erro ao buscar usuários',
+            message: error.message 
+        });
     }
-
 });
 
 /**
@@ -208,15 +266,19 @@ app.get('/usuarios', async (req, res) => {
 app.get('/usuarios/:id', async (req, res) => {
     try {
         const user = await User.findById(req.params.id);
-        if (!user) return res.status(404).send('Usuário não encontrado');
+        if (!user) {
+            return res.status(404).json({ error: 'Usuário não encontrado' });
+        }
 
         logInfo('Usuário encontrado', req, user);
-        res.send(user);
+        res.status(200).json(user);
     } catch (error) {
         logError("Erro ao buscar usuário", req, error);
-        res.status(500).send('Ocorreu um erro interno');
+        res.status(500).json({ 
+            error: 'Erro ao buscar usuário',
+            message: error.message 
+        });
     }
-
 });
 
 /**
@@ -265,13 +327,18 @@ app.get('/usuarios/:id', async (req, res) => {
 app.put('/usuarios/:id', async (req, res) => {
     try {
         const user = await User.findByIdAndUpdate(req.params.id, req.body, { new: true });
-        if (!user) return res.status(404).send('Usuário não encontrado');
+        if (!user) {
+            return res.status(404).json({ error: 'Usuário não encontrado' });
+        }
 
         logInfo('Usuário atualizado', req, user);
-        res.send(user);
+        res.status(200).json(user);
     } catch (error) {
         logError("Erro ao atualizar usuário", req, error);
-        res.status(500).send('Ocorreu um erro interno');
+        res.status(500).json({ 
+            error: 'Erro ao atualizar usuário',
+            message: error.message 
+        });
     }
 });
 
@@ -311,16 +378,18 @@ app.delete('/usuarios/:id', async (req, res) => {
     try {
         const result = await User.deleteOne({ _id: req.params.id });
         if (result.deletedCount === 0) {
-            return res.status(404).send('Usuário não encontrado');
+            return res.status(404).json({ error: 'Usuário não encontrado' });
         }
 
         logInfo('Usuário removido', req);
-        res.send({ message: 'Usuário removido com sucesso' });
+        res.status(200).json({ message: 'Usuário removido com sucesso' });
     } catch (error) {
-        logError("Erro ao remover usuário", req, error)
-        res.status(500).send('Ocorreu um erro interno');
+        logError("Erro ao remover usuário", req, error);
+        res.status(500).json({ 
+            error: 'Erro ao remover usuário',
+            message: error.message 
+        });
     }
-
 });
 //#endregion
 
@@ -352,7 +421,7 @@ app.get('/buckets', async (req, res) => {
         res.status(200).json(data.Buckets);
     } catch (error) {
         logError("Erro ao buscar buckets", req, error);
-        res.status(500).json({ error: 'Erro ao listar buckets', details: error });
+        res.status(500).json({ error: 'Erro ao listar buckets', details: error.message });
     }
 });
 
@@ -384,7 +453,7 @@ app.get('/buckets/:bucketName', async (req, res) => {
         res.status(200).json(data.Contents);
     } catch (error) {
         logError("Erro ao buscar objetos", req, error);
-        res.status(500).json({ error: 'Erro ao listar objetos do bucket', details: error });
+        res.status(500).json({ error: 'Erro ao listar objetos do bucket', details: error.message });
     }
 });
 
@@ -558,8 +627,284 @@ app.delete('/buckets/:bucketName/file/:fileName', async (req, res) => {
         });
     }
 });
+
+//#region CRUD MySQL
+
+/**
+ * @swagger
+ * /mysql/testar-conexao:
+ *   get:
+ *     tags:
+ *       - CRUD MySQL
+ *     summary: Testa a conexão com o MySQL
+ *     responses:
+ *       200:
+ *         description: Conexão bem-sucedida
+ *       500:
+ *         description: Erro na conexão
+ */
+app.get('/mysql/testar-conexao', async (req, res) => {
+    try {
+        const connection = await pool.getConnection();
+        const [rows] = await connection.execute('SELECT 1 as test');
+        connection.release();
+        
+        logInfo('Conexão MySQL testada com sucesso', req);
+        res.status(200).json({ 
+            message: 'Conexão MySQL bem-sucedida',
+            test: rows[0]
+        });
+    } catch (error) {
+        logError('Erro ao testar conexão MySQL', req, error);
+        res.status(500).json({ 
+            error: 'Erro na conexão MySQL',
+            message: error.message 
+        });
+    }
+});
+
+/**
+ * @swagger
+ * /produtos:
+ *   get:
+ *     tags:
+ *       - CRUD MySQL
+ *     summary: Lista todos os produtos
+ *     responses:
+ *       200:
+ *         description: Lista de produtos
+ */
+app.get('/produtos', async (req, res) => {
+    try {
+        const [rows] = await pool.query('SELECT * FROM produto');
+        logInfo('Produtos listados com sucesso', req);
+        res.status(200).json(rows);
+    } catch (error) {
+        logError('Erro ao listar produtos', req, error);
+        res.status(500).json({ 
+            error: 'Erro ao listar produtos',
+            message: error.message 
+        });
+    }
+});
+
+/**
+ * @swagger
+ * /produtos:
+ *   post:
+ *     tags:
+ *       - CRUD MySQL
+ *     summary: Cria um novo produto
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - nome
+ *               - descricao
+ *               - preco
+ *             properties:
+ *               nome:
+ *                 type: string
+ *               descricao:
+ *                 type: string
+ *               preco:
+ *                 type: number
+ *     responses:
+ *       201:
+ *         description: Produto criado
+ */
+app.post('/produtos', async (req, res) => {
+    const { nome, descricao, preco } = req.body;
+    
+    try {
+        // Validação básica
+        if (!nome || !descricao || !preco) {
+            return res.status(400).json({ 
+                error: 'Nome, descrição e preço são obrigatórios' 
+            });
+        }
+
+        const [result] = await pool.query(
+            'INSERT INTO produto (Nome, Descricao, Preco) VALUES (?, ?, ?)',
+            [nome, descricao, preco]
+        );
+        
+        logInfo('Produto criado com sucesso', req);
+        res.status(201).json({ 
+            id: result.insertId, 
+            nome, 
+            descricao, 
+            preco 
+        });
+    } catch (error) {
+        logError('Erro ao criar produto', req, error);
+        res.status(500).json({ 
+            error: 'Erro ao criar produto',
+            message: error.message 
+        });
+    }
+});
+
+/**
+ * @swagger
+ * /produtos/{id}:
+ *   get:
+ *     tags:
+ *       - CRUD MySQL
+ *     summary: Busca um produto pelo ID
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Produto encontrado
+ *       404:
+ *         description: Produto não encontrado
+ */
+app.get('/produtos/:id', async (req, res) => {
+    try {
+        const [rows] = await pool.query('SELECT * FROM produto WHERE Id = ?', [req.params.id]);
+        
+        if (rows.length === 0) {
+            return res.status(404).json({ error: 'Produto não encontrado' });
+        }
+        
+        logInfo('Produto encontrado', req);
+        res.status(200).json(rows[0]);
+    } catch (error) {
+        logError('Erro ao buscar produto', req, error);
+        res.status(500).json({ 
+            error: 'Erro ao buscar produto',
+            message: error.message 
+        });
+    }
+});
+
+/**
+ * @swagger
+ * /produtos/{id}:
+ *   put:
+ *     tags:
+ *       - CRUD MySQL
+ *     summary: Atualiza um produto pelo ID
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               nome:
+ *                 type: string
+ *               descricao:
+ *                 type: string
+ *               preco:
+ *                 type: number
+ *     responses:
+ *       200:
+ *         description: Produto atualizado
+ *       404:
+ *         description: Produto não encontrado
+ */
+app.put('/produtos/:id', async (req, res) => {
+    const { nome, descricao, preco } = req.body;
+    
+    try {
+        const [result] = await pool.query(
+            'UPDATE produto SET Nome = ?, Descricao = ?, Preco = ? WHERE Id = ?',
+            [nome, descricao, preco, req.params.id]
+        );
+        
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Produto não encontrado' });
+        }
+        
+        logInfo('Produto atualizado', req);
+        res.status(200).json({ 
+            id: req.params.id, 
+            nome, 
+            descricao, 
+            preco 
+        });
+    } catch (error) {
+        logError('Erro ao atualizar produto', req, error);
+        res.status(500).json({ 
+            error: 'Erro ao atualizar produto',
+            message: error.message 
+        });
+    }
+});
+
+/**
+ * @swagger
+ * /produtos/{id}:
+ *   delete:
+ *     tags:
+ *       - CRUD MySQL
+ *     summary: Remove um produto pelo ID
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Produto removido
+ *       404:
+ *         description: Produto não encontrado
+ */
+app.delete('/produtos/:id', async (req, res) => {
+    try {
+        const [result] = await pool.query('DELETE FROM produto WHERE Id = ?', [req.params.id]);
+        
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Produto não encontrado' });
+        }
+        
+        logInfo('Produto removido', req);
+        res.status(200).json({ message: 'Produto removido com sucesso' });
+    } catch (error) {
+        logError('Erro ao remover produto', req, error);
+        res.status(500).json({ 
+            error: 'Erro ao remover produto',
+            message: error.message 
+        });
+    }
+});
+
 //#endregion
 
+// Inicializar conexões e servidor
+async function startServer() {
+    try {
+        // Testar conexões na inicialização
+        await testMySQLConnection();
+        
+        // Inicializar Swagger
+        swaggerDocs(app);
+        
+        // Iniciar servidor
+        app.listen(3000, () => {
+            console.log('🚀 Servidor rodando na porta 3000');
+            console.log('📚 Documentação Swagger disponível em: http://localhost:3000/api-docs');
+        });
+    } catch (error) {
+        console.error('❌ Erro ao iniciar servidor:', error);
+        process.exit(1);
+    }
+}
 
-swaggerDocs(app);
-app.listen(3000, () => console.log('Servidor rodando na porta 3000'));
+startServer();
